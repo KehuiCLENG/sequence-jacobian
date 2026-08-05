@@ -26,7 +26,10 @@ class StageBlock(Block):
             inputs |= (stage.inputs - stages[(i+1) % len(stages)].backward_outputs)
             outputs |= stage.report
         
-        # TODO: should have internals
+        # internals are reported per stage: requesting this block's
+        # internals in impulse_nonlinear returns {stage: {var: path}}
+        # (block.py dispatches on hasattr(self, 'internals'))
+        self.internals = OrderedSet([stage.name for stage in stages])
 
         self.constructor_checks(stages, inputs, outputs)
         self.stages = stages
@@ -111,7 +114,7 @@ class StageBlock(Block):
 
         return SteadyStateDict(aggregates, {self.name: internals})
 
-    def _impulse_nonlinear(self, ssin, inputs, outputs, ss_initial):
+    def _impulse_nonlinear(self, ssin, inputs, outputs, internals, ss_initial):
         ss = self.extract_ss_dict(ssin)
         if ss_initial is not None:
             ss[self.stages[0].name]['D'] = ss_initial[self.name][self.stages[0].name]['D']
@@ -119,7 +122,7 @@ class StageBlock(Block):
         # report_path is dict(stage: {output: TxN-dim array})
         # lom_path is list[t][stage] in chronological order
         report_path, lom_path = self.backward_nonlinear(ss, inputs)
-        
+
         # D_path is dict(stage: TxN-dim array)
         D_path = self.forward_nonlinear(ss, lom_path)
 
@@ -129,7 +132,19 @@ class StageBlock(Block):
                 if self.M_outputs @ o in outputs:
                     aggregates[self.M_outputs @ o] = utils.optimized_routines.fast_aggregate(D_path[stage.name], report_path[stage.name][o])
 
-        return ImpulseDict(aggregates, T=inputs.T) - ssin
+        out = ImpulseDict(aggregates, T=inputs.T) - ssin
+        # per-stage internal paths as DEVIATIONS from ss (HetBlock
+        # convention). Subtracted here because ImpulseDict's generic
+        # arithmetic does not recurse into the per-stage nesting; do not
+        # apply further ImpulseDict binary ops across these internals.
+        if internals:
+            idict = {}
+            for sname in internals:
+                idict[sname] = {o: report_path[sname][o] - ss[sname][o]
+                                for o in report_path[sname]}
+                idict[sname]['D'] = D_path[sname] - ss[sname]['D']
+            out.internals[self.name] = idict
+        return out
 
     def _impulse_linear(self, ss, inputs, outputs, Js):
         return ImpulseDict(self._jacobian(ss, list(inputs.keys()), outputs, inputs.T).apply(inputs))
@@ -319,7 +334,11 @@ class StageBlock(Block):
             dout, dlom = stage.backward_step_shock(ss, din_all, precomp)
             dloms.append(dlom)
 
-            dback = {k: dout[k] for k in stage.backward_outputs}
+            # sparse: a stage untouched by the shock (e.g. an exogenous
+            # stage processed first, before any backward feedback) may
+            # return no perturbation to some backward outputs; absent
+            # keys mean zero and are handled by every consumer
+            dback = {k: dout[k] for k in stage.backward_outputs if k in dout}
             
             if hetoutputs is not None and output_list & hetoutputs.outputs:
                 din_all.update(dout)
@@ -479,7 +498,12 @@ class StageBlock(Block):
 
     def return_hetinputs(self, d):
         if self.hetinputs is not None:
-            return self.hetinputs(d)
+            # subset to actual hetinput OUTPUTS: CombinedExtendedFunction
+            # with outputs=None returns inputs | outputs, and _steady_state
+            # stores this dict as block internals, where stale INPUT values
+            # (e.g. calibration scalars) would shadow toplevel updates in
+            # extract_ss_dict for any later jacobian/impulse call
+            return self.hetinputs(d, outputs=self.hetinputs.outputs)
         else:
             return {}
 

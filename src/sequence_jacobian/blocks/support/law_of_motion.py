@@ -110,11 +110,54 @@ class PolicyLottery2D(LawOfMotion):
 
 
 class ShockedPolicyLottery2D(PolicyLottery2D):
+    """Derivative of a 2D policy lottery with respect to policy perturbations.
+
+    Unlike the 1D case, the derivative of the product lottery
+    d(L1 x L2) = dL1 x L2 + L1 x dL2 requires the STEADY-STATE weights of
+    both coordinates in addition to the weight shocks. Construct via the
+    parent with steady-state (i1, pi1, i2, pi2), then set the weight shocks
+    (dpi1, dpi2). het_compiled.forward_policy_shock_2d implements the exact
+    four-corner derivative.
+    """
+    def __init__(self, i1, pi1, i2, pi2, grid1, grid2, dpi1, dpi2,
+                 forward=True):
+        super().__init__(i1, pi1, i2, pi2, grid1, grid2, forward)
+        self.dpi1 = dpi1.reshape(self.flatshape)
+        self.dpi2 = dpi2.reshape(self.flatshape)
+
     def __matmul__(self, X):
         if self.forward:
-            return het_compiled.forward_policy_shock_2d(X.reshape(self.flatshape), self.i, self.pi).reshape(self.shape)
+            return het_compiled.forward_policy_shock_2d(
+                X.reshape(self.flatshape), self.i1, self.i2,
+                self.pi1, self.pi2, self.dpi1, self.dpi2).reshape(self.shape)
         else:
             raise NotImplementedError
+
+
+class MixtureLottery(LawOfMotion):
+    """Finite mixture of laws of motion: L = sum_m w_m * L_m.
+    Used for stochastic-kernel transitions on a continuous dimension
+    (e.g. a quadrature-discretized multiplicative shock composed with
+    a policy lottery: each node m contributes its own policy lottery
+    at the shocked landing point). Forward and expectation both
+    distribute over the mixture; .T transposes componentwise."""
+
+    def __init__(self, weights, loms):
+        self.weights = [float(w) for w in weights]
+        self.loms = list(loms)
+        self.shape = self.loms[0].shape
+
+    @property
+    def T(self):
+        newself = copy.copy(self)
+        newself.loms = [lom.T for lom in self.loms]
+        return newself
+
+    def __matmul__(self, X):
+        out = self.weights[0] * (self.loms[0] @ X)
+        for w, lom in zip(self.weights[1:], self.loms[1:]):
+            out = out + w * (lom @ X)
+        return out
 
 
 class Markov(LawOfMotion):
