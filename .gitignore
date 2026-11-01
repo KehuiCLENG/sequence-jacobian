@@ -10,7 +10,11 @@ notebooks/.ipynb_checkpoints/
 !notebooks.zip
 
 scripts/
+# `scripts/` above matches at any depth; re-include the Claude skill's scripts
+!.claude/skills/*/scripts/
 wiki/
+
+.venv/
 *.egg-info/
 
 dist/
